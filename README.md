@@ -15,7 +15,7 @@ Example use cases include repeated camera sensor spots, dust marks, or other rec
 
 ## Planned stack
 
-- **Coding assistant:** Qwen2.5-Coder 32B
+- **Coding/planning:** qwen2.5-coder:32b
 - **Detection/refinement:** OpenCV + SAM2
 - **Primary remover:** LaMa
 - **Fallback generator:** SDXL Inpainting
