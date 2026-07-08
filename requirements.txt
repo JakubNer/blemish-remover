@@ -1,0 +1,30 @@
+# Main application dependencies only.
+# LaMa is intentionally installed in a separate environment under
+# third_party/lama-runtime/.venv to avoid dependency conflicts with
+# the main OpenCV + SAM2 + diffusers environment.
+
+# Core image processing
+numpy
+Pillow
+opencv-python
+
+# PyTorch stack
+# Pin torch/torchvision to versions that match your CUDA/CPU setup if needed.
+torch
+torchvision
+
+# Segmentation / inpainting orchestration
+scipy
+tqdm
+PyYAML
+omegaconf
+hydra-core
+
+
+# Hugging Face / diffusion stack
+diffusers
+transformers
+accelerate
+safetensors
+huggingface-hub
+

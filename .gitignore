@@ -1,1 +1,18 @@
+# Project data
 /images
+
+# Virtual environments
+.venv/
+third_party/**/.venv/
+
+# Python cache / build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+
+# Common local tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
