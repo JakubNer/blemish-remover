@@ -2,6 +2,33 @@
 
 A Python project for detecting and removing a repeated blemish across a batch of images.
 
+## How to run
+
+After completing the setup below, you can run the tool against the example images in `/images/1.png` through `/images/3.png` like this:
+
+```powershell terminal
+.\.venv\Scripts\python.exe -m src --input .\images --output .\output-example
+```
+
+What this does:
+- reads the example batch from `./images` (`1.png`, `2.png`, `3.png`),
+- detects the repeated blemish shared across those images,
+- writes a preview of the detected blemish to `./blemish_previews`,
+- asks you to confirm the detection,
+- writes cleaned copies to `./output-example`.
+
+If you want to skip the confirmation prompt:
+
+```powershell terminal
+.\.venv\Scripts\python.exe -m src --input .\images --output .\output-example --skip-confirm
+```
+
+Useful optional flags:
+- `--device cpu` to run on CPU instead of CUDA
+- `--no-lama` to disable LaMa and use only the SDXL fallback
+- `--no-sdxl` to disable SDXL fallback and use only LaMa
+- `-v` for verbose logging
+
 ## Goal
 
 The tool will:
