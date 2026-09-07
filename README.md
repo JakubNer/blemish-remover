@@ -1,52 +1,61 @@
-# blemish-remover
+# watermark-remover
 
-A Python project for detecting and removing a repeated blemish across a batch of images.
+A guide-based tool for finding and removing a large watermark from a batch of images.
+
+## Watermark guides
+
+Place one or more rough examples of the watermark in `./watermark`. The guide does not need to be an exact copy: it supplies the expected shape, aspect ratio, and relative footprint. Supported guide formats are PNG, JPEG, BMP, TIFF, and WebP.
+
+Guides can be either:
+
+- transparent PNG artwork, where the alpha channel defines the watermark, or
+- dark watermark artwork on a plain light background, such as `watermark/gps.jpg`.
+
+Each guide should show the complete mark, including small text, borders, and long letter tails. Extra margins are useful because their proportions tell the matcher roughly how large the watermark is relative to the photograph. Multiple files are treated as alternate guide variants.
+
+## How detection works
+
+For every input image, the program:
+
+1. extracts the shape from each rough guide;
+2. computes a multi-scale response for light, semi-transparent marks;
+3. searches the full photograph across a range of guide sizes;
+4. chooses the strongest position, scale, and guide variant;
+5. transforms the complete guide mask into that image independently; and
+6. expands the mask slightly before inpainting.
+
+This avoids constructing a watermark from repeated motorcycle or road pixels. The batch images no longer define the watermark shape; the supplied guide does.
 
 ## How to run
 
-After completing the setup below, you can run the tool against the example images in `/images/1.png` through `/images/3.png` like this:
+Run the included example using `watermark/gps.jpg` as the guide:
 
 ```powershell terminal
-.\.venv\Scripts\python.exe -m src --input .\images --output .\output-example
+.\.venv\Scripts\python.exe -m src --input .\images --watermark .\watermark --output .\output-example
 ```
 
-What this does:
-- reads the example batch from `./images` (`1.png`, `2.png`, `3.png`),
-- detects the repeated blemish shared across those images,
-- writes a preview of the detected blemish to `./blemish_previews`,
-- asks you to confirm the detection,
-- writes cleaned copies to `./output-example`.
+The program writes detection previews to `./blemish_previews`, asks for confirmation, and writes cleaned images to `./output-example`.
 
-If you want to skip the confirmation prompt:
+To skip confirmation:
 
 ```powershell terminal
-.\.venv\Scripts\python.exe -m src --input .\images --output .\output-example --skip-confirm
+.\.venv\Scripts\python.exe -m src --input .\images --watermark .\watermark --output .\output-example --skip-confirm
 ```
 
 Useful optional flags:
-- `--device cpu` to run on CPU instead of CUDA
-- `--no-lama` to disable LaMa and use only the SDXL fallback
-- `--no-sdxl` to disable SDXL fallback and use only LaMa
-- `-v` for verbose logging
 
-## Goal
+- `--watermark PATH` selects another guide directory.
+- `--device cpu` runs inference on CPU instead of CUDA.
+- `--no-lama` disables LaMa and uses the SDXL fallback.
+- `--no-sdxl` disables SDXL fallback.
+- `--size-tolerance RATIO` controls per-image size variation.
+- `-v` enables detailed matching logs.
 
-The tool will:
-- scan a folder of images that all contain the same repeating blemish,
-- identify the common blemish pattern,
-- show the detected blemish to the user for confirmation,
-- remove that blemish from each image,
-- write the cleaned images to a separate output folder using the same filenames.
+## Removal backends
 
-Example use cases include repeated camera sensor spots, dust marks, or other recurring artifacts.
-
-## Planned stack
-
-- **Coding/planning:** qwen2.5-coder:32b
-- **Detection/refinement:** OpenCV + SAM2
-- **Primary remover:** LaMa
-- **Fallback generator:** SDXL Inpainting
-- **Serving/orchestration:** Python + PyTorch + diffusers
+1. **LaMa** is the primary inpainting backend.
+2. **SDXL Inpainting** is the optional fallback.
+3. **OpenCV Telea** is the final local fallback.
 
 ## Environment layout
 

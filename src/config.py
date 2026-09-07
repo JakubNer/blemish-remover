@@ -15,6 +15,7 @@ class Config:
     input_dir: Path = field(default_factory=lambda: Path("input"))
     output_dir: Path = field(default_factory=lambda: Path("output"))
     blemish_preview_dir: Path = field(default_factory=lambda: Path("blemish_previews"))
+    watermark_dir: Path = field(default_factory=lambda: Path("watermark"))
 
     # --- LaMa ---
     lama_venv_python: Optional[Path] = field(
@@ -34,6 +35,18 @@ class Config:
     # Expected transparent watermark footprint used to bias component selection.
     expected_watermark_width: int = 2000
     expected_watermark_height: int = 1100
+    # The blemish is known to occupy at least 10% of the image. This
+    # resolution-independent prior prevents selection of ordinary small spots.
+    min_blemish_area_ratio: float = 0.10
+    # Small batch-level drift allowed while intersecting repeated responses.
+    aggregation_tolerance_ratio: float = 0.012
+    # Per-image localization tolerances for small position and size changes.
+    location_tolerance_ratio: float = 0.08
+    size_tolerance_ratio: float = 0.12
+    # Rough guides may differ substantially from the rendered watermark size.
+    guide_scale_tolerance_ratio: float = 0.22
+    scale_search_steps: int = 9
+    localization_min_score: float = 0.08
     # Largest side used for detection; images are downscaled only for analysis.
     detection_max_dim: int = 2560
     # Expand/merge detected watermark fragments before removal.
@@ -57,6 +70,8 @@ class Config:
         """Validate and resolve paths."""
         if not self.input_dir.is_dir():
             raise FileNotFoundError(f"Input directory does not exist: {self.input_dir}")
+        if not self.watermark_dir.is_dir():
+            raise FileNotFoundError(f"Watermark guide directory does not exist: {self.watermark_dir}")
 
         # Create output dirs if they don't exist
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -71,6 +86,8 @@ class Config:
             cfg.input_dir = Path(args.input)
         if hasattr(args, "output") and args.output:
             cfg.output_dir = Path(args.output)
+        if hasattr(args, "watermark") and args.watermark:
+            cfg.watermark_dir = Path(args.watermark)
         if hasattr(args, "device") and args.device:
             cfg.device = args.device
         if hasattr(args, "no_lama"):
@@ -83,4 +100,9 @@ class Config:
             cfg.match_threshold = args.threshold
         if hasattr(args, "sample") and args.sample is not None:
             cfg.detection_sample = args.sample
+        if hasattr(args, "location_tolerance") and args.location_tolerance is not None:
+            cfg.location_tolerance_ratio = args.location_tolerance
+        if hasattr(args, "size_tolerance") and args.size_tolerance is not None:
+            cfg.size_tolerance_ratio = args.size_tolerance
+            cfg.guide_scale_tolerance_ratio = args.size_tolerance
         return cfg

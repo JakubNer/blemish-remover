@@ -6,7 +6,7 @@ from collections import Counter
 import logging
 import random
 
-from src.detector import detect_common_blemish, save_detection_preview
+from src.detector import detect_common_blemish, localize_blemish_mask, save_detection_preview
 from src.remover import BlemishRemover
 from src.utils import discover_images, load_image, progress_iter, save_image
 
@@ -29,7 +29,7 @@ def _select_detection_images(images: list, sample_size: int) -> list:
 
 def _confirm_detection() -> bool:
     while True:
-        answer = input("Use this detected blemish mask for cleaning? [y/n]: ").strip().lower()
+        answer = input("Use this matched watermark mask for cleaning? [y/n]: ").strip().lower()
         if answer in {"y", "yes"}:
             return True
         if answer in {"n", "no"}:
@@ -46,12 +46,13 @@ def run_pipeline(cfg, skip_confirm: bool = False) -> None:
         raise RuntimeError(f"No supported images were found in {cfg.input_dir}")
 
     detection_images = _select_detection_images(images, cfg.detection_sample)
-    log.info("Using %d image(s) for blemish detection", len(detection_images))
+    log.info("Matching watermark guides against %d image(s)", len(detection_images))
 
     detection = detect_common_blemish(detection_images, cfg)
-    detection = save_detection_preview(detection_images[0], detection, cfg.blemish_preview_dir)
+    preview_image = detection.representative_image or detection_images[0]
+    detection = save_detection_preview(preview_image, detection, cfg.blemish_preview_dir)
 
-    print("Detected blemish preview files:")
+    print("Matched watermark preview files:")
     if detection.overlay_path is not None:
         print(f"  Overlay: {detection.overlay_path}")
     if detection.crop_path is not None:
@@ -66,7 +67,9 @@ def run_pipeline(cfg, skip_confirm: bool = False) -> None:
 
     for image_path in progress_iter(images, desc="Cleaning images"):
         image = load_image(image_path)
-        cleaned, method = remover.remove_from_image(image, detection.mask)
+        image_mask, localization_score = localize_blemish_mask(image, detection, cfg)
+        log.debug("Localized blemish in %s (score %.3f)", image_path.name, localization_score)
+        cleaned, method = remover.remove_from_image(image, image_mask)
         save_image(cfg.output_dir / image_path.name, cleaned)
         summary[method] += 1
 

@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import argparse
 import sys
-from pathlib import Path
 
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the argument parser."""
     parser = argparse.ArgumentParser(
         prog="blemish-remover",
-        description="Detect and remove a repeated blemish across a batch of images.",
+        description="Find a guided watermark in each image and remove it.",
     )
 
     parser.add_argument(
@@ -25,6 +24,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default="output",
         help="Path to folder for cleaned images (default: ./output)",
+    )
+    parser.add_argument(
+        "-w", "--watermark",
+        type=str,
+        default="watermark",
+        help="Folder containing rough watermark guide images (default: ./watermark)",
     )
     parser.add_argument(
         "-d", "--device",
@@ -47,13 +52,27 @@ def build_parser() -> argparse.ArgumentParser:
         "-t", "--threshold",
         type=float,
         default=None,
-        help="Template matching threshold 0-1 (default: 0.7)",
+        help="Reserved compatibility option for older unguided detection",
     )
     parser.add_argument(
         "--sample",
         type=int,
         default=None,
-        help="Number of images to sample for detection (default: all)",
+        help="Number of images considered when choosing the preview (default: all)",
+    )
+    parser.add_argument(
+        "--location-tolerance",
+        type=float,
+        default=None,
+        metavar="RATIO",
+        help="Maximum per-image position drift as an image ratio (default: 0.08)",
+    )
+    parser.add_argument(
+        "--size-tolerance",
+        type=float,
+        default=None,
+        metavar="RATIO",
+        help="Maximum per-image blemish size drift (default: 0.12)",
     )
     parser.add_argument(
         "-v", "--verbose",

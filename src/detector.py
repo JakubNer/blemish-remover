@@ -1,9 +1,7 @@
-"""Repeated watermark detection using OpenCV-based aggregation.
+"""Guide-based detection for large semi-transparent watermarks.
 
-This module is tuned for large, semi-transparent watermarks that recur in the
-same location across many images. Unlike the original blemish-focused logic,
-it supports broad masks, multiple disconnected watermark fragments, and a size
-prior for watermark footprints around 2000x1100 pixels.
+User-provided rough artwork defines the complete watermark shape. OpenCV then
+matches that guide independently in each photograph over position and scale.
 """
 
 from __future__ import annotations
@@ -23,12 +21,15 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class DetectionResult:
-    """Container for the detected watermark mask and preview metadata."""
+    """Container for the guide-based watermark model and preview metadata."""
 
     mask: np.ndarray
     bbox: tuple[int, int, int, int]
     score: float
     reference_shape: tuple[int, int]
+    response_template: np.ndarray | None = None
+    detection_shape: tuple[int, int] | None = None
+    guide_templates: list[tuple[np.ndarray, tuple[float, float]]] | None = None
     overlay_path: Path | None = None
     crop_path: Path | None = None
     representative_image: Path | None = None
@@ -63,42 +64,54 @@ def _resize_for_detection(image_bgr: np.ndarray, max_dim: int) -> np.ndarray:
 
 
 def _watermark_response_map(image_bgr: np.ndarray) -> np.ndarray:
-    """Build a response map for broad transparent watermarks."""
+    """Build a response map for a broad, light semi-transparent watermark.
+
+    Signed bright residuals are intentional: ordinary dark scene edges used to
+    be mistaken for the logo. A white watermark remains brighter than its local
+    background at several scales, including its fine URL text and broad GP.
+    """
     image_float = image_bgr.astype(np.float32) / 255.0
     gray = cv2.cvtColor(image_float, cv2.COLOR_BGR2GRAY)
-    hsv = cv2.cvtColor(image_float, cv2.COLOR_BGR2HSV)
+    gray = cv2.GaussianBlur(gray, (0, 0), sigmaX=0.8)
 
-    gray = cv2.GaussianBlur(gray, (0, 0), sigmaX=1.2)
-    gray_blur_medium = cv2.GaussianBlur(gray, (0, 0), sigmaX=24.0)
-    gray_blur_large = cv2.GaussianBlur(gray, (0, 0), sigmaX=72.0)
+    residuals = []
+    for sigma in (2.0, 5.0, 12.0, 25.0, 55.0):
+        background = cv2.GaussianBlur(gray, (0, 0), sigmaX=sigma)
+        residuals.append(np.maximum(gray - background, 0.0))
 
-    detail_medium = np.abs(gray - gray_blur_medium)
-    detail_large = np.abs(gray - gray_blur_large)
+    response = np.maximum.reduce(residuals).astype(np.float32)
+    robust_high = float(np.quantile(response, 0.995))
+    if robust_high > 0:
+        response = np.clip(response / robust_high, 0.0, 1.0)
+    return cv2.GaussianBlur(response, (0, 0), sigmaX=1.0)
 
-    grad_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
-    grad_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
-    gradient = cv2.magnitude(grad_x, grad_y)
 
-    saturation = hsv[:, :, 1]
-    value = hsv[:, :, 2]
-    saturation_residual = np.abs(saturation - cv2.GaussianBlur(saturation, (0, 0), sigmaX=24.0))
-    value_residual = np.abs(value - cv2.GaussianBlur(value, (0, 0), sigmaX=24.0))
+def _aggregate_repeated_response(response_maps: list[np.ndarray], cfg) -> np.ndarray:
+    """Keep responses present in every image while tolerating small drift.
 
-    response = (
-        0.36 * _normalize_map(detail_medium)
-        + 0.24 * _normalize_map(detail_large)
-        + 0.22 * _normalize_map(gradient)
-        + 0.10 * _normalize_map(saturation_residual)
-        + 0.08 * _normalize_map(value_residual)
-    )
-    response = cv2.GaussianBlur(response.astype(np.float32), (0, 0), sigmaX=2.0)
-    return _normalize_map(response)
+    Local max filtering permits slight shifts. A low cross-image percentile
+    acts like a softened intersection, strongly rejecting motorcycle and road
+    detail that occurs in only one photograph.
+    """
+    if not response_maps:
+        raise ValueError("At least one response map is required.")
+    h, w = response_maps[0].shape
+    radius = max(1, int(round(min(h, w) * float(cfg.aggregation_tolerance_ratio))))
+    kernel_size = radius * 2 + 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+    tolerant_maps = [cv2.dilate(response.astype(np.float32), kernel) for response in response_maps]
+    stack = np.stack(tolerant_maps, axis=0)
+    repeated = np.quantile(stack, 0.15, axis=0).astype(np.float32)
+    consensus = repeated * (0.65 + 0.35 * np.mean(stack, axis=0))
+    return _normalize_map(consensus)
 
 
 def _expected_priors(cfg, shape: tuple[int, int]) -> tuple[float, float]:
-    h, w = shape
-    expected_area = max(1.0, float(cfg.expected_watermark_width) * float(cfg.expected_watermark_height))
-    expected_area_ratio = min(0.95, expected_area / max(1.0, float(h * w)))
+    # A ratio is resolution independent. The repeated artifact is known to
+    # occupy at least one tenth of the image, while the configured dimensions
+    # still provide a useful aspect-ratio prior.
+    expected_area_ratio = max(0.10, float(cfg.min_blemish_area_ratio))
+    expected_area_ratio = min(0.90, expected_area_ratio)
     expected_aspect = float(cfg.expected_watermark_width) / max(1.0, float(cfg.expected_watermark_height))
     return expected_area_ratio, expected_aspect
 
@@ -196,59 +209,163 @@ def _mask_bbox(mask: np.ndarray) -> tuple[int, int, int, int]:
     return x0, y0, x1, y1
 
 
+def _guide_mask(path: Path) -> tuple[np.ndarray, tuple[float, float]]:
+    """Extract artwork from an RGBA guide or a dark-on-light rough sketch."""
+    raw = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    if raw is None:
+        raise RuntimeError(f"Could not read watermark guide: {path}")
+
+    if raw.ndim == 3 and raw.shape[2] == 4 and np.any(raw[:, :, 3] < 255):
+        strength = raw[:, :, 3]
+    else:
+        bgr = raw[:, :, :3] if raw.ndim == 3 else cv2.cvtColor(raw, cv2.COLOR_GRAY2BGR)
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        border = np.concatenate((gray[0], gray[-1], gray[:, 0], gray[:, -1]))
+        background = float(np.median(border))
+        strength = np.clip(np.abs(gray.astype(np.float32) - background), 0, 255).astype(np.uint8)
+
+    nonzero = strength[strength > 2]
+    if nonzero.size == 0:
+        raise RuntimeError(f"Watermark guide has no visible artwork: {path}")
+    otsu, _ = cv2.threshold(strength, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    threshold = max(5, min(32, int(round(otsu * 0.40))))
+    mask = (strength >= threshold).astype(np.uint8) * 255
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+    cleaned = np.zeros_like(mask)
+    minimum = max(4, int(mask.size * 0.000003))
+    for label in range(1, count):
+        if stats[label, cv2.CC_STAT_AREA] >= minimum:
+            cleaned[labels == label] = 255
+
+    x0, y0, x1, y1 = _mask_bbox(cleaned)
+    footprint = ((x1 - x0 + 1) / raw.shape[1], (y1 - y0 + 1) / raw.shape[0])
+    return cleaned[y0:y1 + 1, x0:x1 + 1], footprint
+
+
+def _load_guide_templates(cfg) -> list[tuple[np.ndarray, tuple[float, float]]]:
+    paths = sorted(
+        path for path in cfg.watermark_dir.iterdir()
+        if path.is_file() and path.suffix.lower() in cfg.image_extensions
+    )
+    if not paths:
+        raise RuntimeError(f"No watermark guide images were found in {cfg.watermark_dir}")
+    templates = [_guide_mask(path) for path in paths]
+    log.info("Loaded %d watermark guide(s) from %s", len(templates), cfg.watermark_dir)
+    return templates
+
+
+def _match_guide(
+    image_bgr: np.ndarray,
+    guides: list[tuple[np.ndarray, tuple[float, float]]],
+    cfg,
+) -> tuple[np.ndarray, float]:
+    """Match rough guide artwork against one image over position and scale."""
+    detection_image = _resize_for_detection(image_bgr, cfg.detection_max_dim)
+    h, w = detection_image.shape[:2]
+    response = _watermark_response_map(detection_image)
+    best_score = -1.0
+    best_mask: np.ndarray | None = None
+    steps = max(3, int(cfg.scale_search_steps))
+    scales = np.linspace(
+        max(0.45, 1.0 - float(cfg.guide_scale_tolerance_ratio)),
+        1.0 + float(cfg.guide_scale_tolerance_ratio),
+        steps,
+    )
+
+    for guide_mask, (width_ratio, height_ratio) in guides:
+        base_w = max(12, int(round(w * width_ratio)))
+        base_h = max(12, int(round(h * height_ratio)))
+        for scale in scales:
+            candidate_w = int(round(base_w * scale))
+            candidate_h = int(round(base_h * scale))
+            if candidate_w < 8 or candidate_h < 8 or candidate_w > w or candidate_h > h:
+                continue
+            candidate_mask = cv2.resize(
+                guide_mask, (candidate_w, candidate_h), interpolation=cv2.INTER_LINEAR
+            )
+            candidate = cv2.GaussianBlur(candidate_mask.astype(np.float32) / 255.0, (0, 0), 1.2)
+            scores = cv2.matchTemplate(response, candidate, cv2.TM_CCOEFF_NORMED)
+            _, score, _, location = cv2.minMaxLoc(scores)
+            if math.isfinite(score) and score > best_score:
+                best_score = float(score)
+                best_mask = _place_scaled_mask(
+                    (candidate_mask >= 20).astype(np.uint8) * 255,
+                    (h, w),
+                    location,
+                    (candidate_w, candidate_h),
+                )
+
+    if best_mask is None:
+        raise RuntimeError("The watermark guides could not be matched to the image.")
+    expand = max(1, int(round(cfg.mask_expand_px * min(h, w) / max(1, cfg.detection_max_dim))))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (expand * 2 + 1, expand * 2 + 1))
+    best_mask = cv2.dilate(best_mask, kernel)
+    return resize_mask(best_mask, image_bgr.shape[:2]), best_score
+
+
 def detect_common_blemish(image_paths: list[Path], cfg) -> DetectionResult:
-    """Detect a repeated transparent watermark shared across a batch of images."""
+    """Build a guide-based detector and locate it in a representative image."""
     if not image_paths:
         raise ValueError("No images were provided for watermark detection.")
-
-    response_maps: list[np.ndarray] = []
-    reference_h = reference_w = 0
-    detection_h = detection_w = 0
-
-    for index, path in enumerate(image_paths):
+    guides = _load_guide_templates(cfg)
+    best: tuple[float, Path, np.ndarray, tuple[int, int]] | None = None
+    for path in image_paths:
         image = load_image(path)
-        if index == 0:
-            reference_h, reference_w = image.shape[:2]
-            detection_image = _resize_for_detection(image, cfg.detection_max_dim)
-            detection_h, detection_w = detection_image.shape[:2]
-        else:
-            if image.shape[:2] != (reference_h, reference_w):
-                image = cv2.resize(image, (reference_w, reference_h), interpolation=cv2.INTER_AREA)
-            detection_image = cv2.resize(image, (detection_w, detection_h), interpolation=cv2.INTER_AREA)
+        mask, score = _match_guide(image, guides, cfg)
+        if best is None or score > best[0]:
+            best = (score, path, mask, image.shape[:2])
 
-        response_maps.append(_watermark_response_map(detection_image))
-
-    stack = np.stack(response_maps, axis=0)
-    median_map = np.median(stack, axis=0)
-    mean_map = np.mean(stack, axis=0)
-    stability_map = _normalize_map(0.72 * median_map + 0.28 * mean_map)
-
-    binary = _threshold_heatmap(stability_map, cfg)
-    mask = _select_watermark_mask(stability_map, binary, cfg)
-    mask = resize_mask(mask, (reference_h, reference_w))
-
-    score = float(stability_map[mask.resize((detection_h, detection_w)) > 0].mean()) if False else 0.0
+    if best is None:
+        raise RuntimeError("No input image could be matched against the watermark guides.")
+    score, representative, mask, reference_shape = best
     bbox = _mask_bbox(mask)
-
-    detection_view_mask = resize_mask(mask, (detection_h, detection_w))
-    score = float(stability_map[detection_view_mask > 0].mean()) if np.any(detection_view_mask > 0) else 0.0
-
     log.info(
-        "Detected watermark with score %.4f at bbox x=%d y=%d w=%d h=%d",
-        score,
-        bbox[0],
-        bbox[1],
-        bbox[2] - bbox[0] + 1,
-        bbox[3] - bbox[1] + 1,
+        "Matched watermark guide with score %.4f at bbox x=%d y=%d w=%d h=%d",
+        score, bbox[0], bbox[1], bbox[2] - bbox[0] + 1, bbox[3] - bbox[1] + 1,
     )
-
     return DetectionResult(
-        mask=mask.astype(np.uint8),
+        mask=mask,
         bbox=bbox,
         score=score,
-        reference_shape=(reference_h, reference_w),
-        representative_image=image_paths[0],
+        reference_shape=reference_shape,
+        guide_templates=guides,
+        representative_image=representative,
     )
+
+
+def _place_scaled_mask(
+    source_mask: np.ndarray,
+    target_shape: tuple[int, int],
+    top_left: tuple[int, int],
+    scaled_size: tuple[int, int],
+) -> np.ndarray:
+    """Resize a template mask and place it in a target detection canvas."""
+    target_h, target_w = target_shape
+    scaled_w, scaled_h = scaled_size
+    scaled = cv2.resize(source_mask, (scaled_w, scaled_h), interpolation=cv2.INTER_NEAREST)
+    x, y = top_left
+    output = np.zeros((target_h, target_w), dtype=np.uint8)
+    x0, y0 = max(0, x), max(0, y)
+    x1, y1 = min(target_w, x + scaled_w), min(target_h, y + scaled_h)
+    if x1 > x0 and y1 > y0:
+        output[y0:y1, x0:x1] = scaled[y0 - y:y1 - y, x0 - x:x1 - x]
+    return output
+
+
+def localize_blemish_mask(
+    image_bgr: np.ndarray,
+    detection: DetectionResult,
+    cfg,
+) -> tuple[np.ndarray, float]:
+    """Match the user-provided rough watermark guide in one image."""
+    if detection.guide_templates:
+        mask, score = _match_guide(image_bgr, detection.guide_templates, cfg)
+        if score < float(cfg.localization_min_score):
+            log.warning("Watermark guide match score is low: %.3f", score)
+        return mask, score
+    return resize_mask(detection.mask, image_bgr.shape[:2]), detection.score
 
 
 def save_detection_preview(
